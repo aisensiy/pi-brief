@@ -278,7 +278,11 @@ class BriefOverlay implements Component {
 		const maxOffset = Math.max(0, body.length - VIEWPORT);
 		this.offset = Math.max(0, Math.min(maxOffset, this.offset));
 
-		const hint = `${this.offset + 1}-${Math.min(body.length, this.offset + VIEWPORT)}/${body.length} · q 关闭 · ↑↓ 滚动`;
+		// 内容超屏时才显示行号窗口，否则纯噪音
+		const scrollInfo = maxOffset > 0
+			? `第 ${this.offset + 1}-${Math.min(body.length, this.offset + VIEWPORT)} 行，共 ${body.length} 行 · `
+			: "";
+		const hint = `${scrollInfo}q 关闭 · ↑↓ 滚动`;
 		const hintLine = ` ${th.fg("dim", truncateToWidth(hint, innerW - 2, "…"))}`;
 
 		const visible = [...body.slice(this.offset, this.offset + VIEWPORT), hintLine];

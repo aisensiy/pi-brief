@@ -136,8 +136,24 @@ function buildBriefModel(ctx: ExtensionContext): BriefModel | null {
 					.map((b) => (b && b.type === "text" && typeof b.text === "string" ? b.text : ""))
 					.join(" ");
 			}
-			const oneLine = text.replace(/\s+/g, " ").trim();
-			if (oneLine) prompts.push({ ms, text: oneLine });
+			// 剥掉 skill 展开块，剩下的才是用户敲的字；纯 skill 消息用名字占位
+			const skills: string[] = [];
+			text = text.replace(SKILL_BLOCK, (_m: string, name: string) => {
+				skills.push(name);
+				return " ";
+			});
+			let oneLine = text.replace(/\s+/g, " ").trim();
+			if (skills.length > 0) {
+				const tag = `[skill: ${skills.join(", ")}]`;
+				oneLine = oneLine ? `${tag} ${oneLine}` : tag;
+			}
+			if (!oneLine) continue;
+			// 超长粘贴类内容拒头去尾：开头是上下文，结尾往往是真正的诉求
+			if (oneLine.length > ELIDE_THRESHOLD) {
+				const hidden = oneLine.length - ELIDE_HEAD - ELIDE_TAIL;
+				oneLine = `${oneLine.slice(0, ELIDE_HEAD)} ……中间省略 ${hidden} 字…… ${oneLine.slice(-ELIDE_TAIL)}`;
+			}
+			prompts.push({ ms, text: oneLine });
 		}
 	}
 
@@ -158,6 +174,12 @@ const VIEWPORT = 18;
 const OVERLAY_WIDTH = 84;
 /** 每条提问最多展示的折行数，超出的用剩余字数提示收尾。 */
 const MAX_PROMPT_LINES = 3;
+/** skill 展开块：pi 会把整个 SKILL.md 塞进 user message，用 <skill name="...">...</skill> 包裹。 */
+const SKILL_BLOCK = /<skill name="([^"]*)"[^>]*>[\s\S]*?<\/skill>/g;
+/** 超长内容（整段粘贴等）的拒头去尾阈值与保留量，避免粘贴淹没问题本身。 */
+const ELIDE_THRESHOLD = 300;
+const ELIDE_HEAD = 72;
+const ELIDE_TAIL = 48;
 
 class BriefOverlay implements Component {
 	private offset = 0;

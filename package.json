@@ -1,0 +1,33 @@
+{
+	"name": "pi-brief",
+	"version": "0.1.0",
+	"description": "Session at a glance for Pi: creation/last-reply time in the footer, /brief overlay with activity timeline and the full list of your prompts",
+	"license": "MIT",
+	"type": "module",
+	"keywords": [
+		"pi-package",
+		"session",
+		"footer",
+		"timeline",
+		"recap"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/aisensiy/pi-brief.git"
+	},
+	"files": [
+		"src",
+		"README.md"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	}
+}

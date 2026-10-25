@@ -23,7 +23,12 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	matchesKey,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 
 const STATUS_KEY = "session-times";
@@ -151,6 +156,8 @@ function buildBriefModel(ctx: ExtensionContext): BriefModel | null {
 
 const VIEWPORT = 18;
 const OVERLAY_WIDTH = 84;
+/** 每条提问最多展示的折行数，超出的用剩余字数提示收尾。 */
+const MAX_PROMPT_LINES = 3;
 
 class BriefOverlay implements Component {
 	private offset = 0;
@@ -227,10 +234,17 @@ class BriefOverlay implements Component {
 		lines.push("");
 		lines.push(th.fg("muted", "提问（旧 → 新）"));
 		const tsWidth = visibleWidth("10-00 00:00  ");
+		const textWidth = Math.max(10, w - tsWidth);
+		const continuation = " ".repeat(tsWidth);
 		for (const p of this.model.prompts) {
 			const ts = th.fg("dim", formatStamp(p.ms).padEnd(tsWidth - 2));
-			const textWidth = Math.max(10, w - tsWidth);
-			lines.push(`${ts} ${truncateToWidth(p.text, textWidth, "…")}`);
+			const wrapped = wrapTextWithAnsi(p.text, textWidth);
+			const shown = wrapped.slice(0, MAX_PROMPT_LINES);
+			shown.forEach((line, i) => lines.push(`${i === 0 ? `${ts} ` : continuation}${line}`));
+			if (wrapped.length > MAX_PROMPT_LINES) {
+				const hidden = p.text.length - shown.reduce((n, line) => n + line.length, 0);
+				lines.push(`${continuation}${th.fg("dim", `…其余 ${hidden} 字`)} `);
+			}
 		}
 		return lines;
 	}

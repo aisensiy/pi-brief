@@ -23,7 +23,8 @@ to a tab days later.
 **`/brief` overlay** (on demand):
 
 - Timeline: creation time, last reply, prompt/reply counts, and a per-day activity bar chart.
-- Every user prompt you sent, oldest to newest, each with its timestamp.
+- Every user prompt you sent, oldest to newest, each with its timestamp. History is read
+  from the full session file, so prompts from before a `/compact` stay visible.
 - Local data only (session entries carry ISO timestamps). Scroll with `↑`/`↓`/`j`/`k`,
   `PgUp`/`PgDn`, `g`/`G`; close with `q` or `Esc`.
 

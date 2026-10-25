@@ -6,8 +6,9 @@
  * 2. /brief 命令：覆盖层展示本会话的时间线（按天回复数）和全部用户提问（旧 → 新），
  *    帮助在 herdr 里切回一个挂了很久的会话时快速恢复上下文。
  *
- * 数据全部来自当前 branch 的 session 条目（每条带 ISO 时间戳）和 session 文件头部
- * （创建时间，branch 经过 compaction 后早期条目会丢失，所以从文件头读）。
+ * 数据来源：session 文件全量 JSONL（每条带 ISO 时间戳）。/brief 读文件而不是活动
+ * 分支，所以 compaction 之后旧提问照样可见；创建时间取文件头部时间戳。footer 的
+ * 最后回复时间只查活动分支（压缩后最后一条回复必然在保留区，不必扫全文件）。
  * 纯本地计算，不发起模型调用，不轮询。
  *
  * 显示格式：`创建 10-23 09:12 · 回复 10-25 19:20`，跨年带年份。
@@ -78,14 +79,31 @@ interface BriefModel {
 	days: Array<{ day: string; count: number }>;
 }
 
-/** 从当前 branch 提取覆盖层要用的全部数据。空会话返回 null。 */
+/** 从当前 branch 或 session 文件提取覆盖层要用的全部数据。空会话返回 null。 */
 function buildBriefModel(ctx: ExtensionContext): BriefModel | null {
+	// 优先读 session 文件全量历史：compaction 只改活动分支，不删文件里的原始条目，
+	// 这样 compact 过的旧会话照样能看到完整提问列表和时间线。没有文件
+	// （--no-session 的临时会话）或读失败时退回当前 branch。
+	const file = ctx.sessionManager.getSessionFile?.();
+	let entries: SessionEntry[] | undefined;
+	if (file) {
+		try {
+			entries = readFileSync(file, "utf8")
+				.split("\n")
+				.map((line) => line.trim())
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as SessionEntry);
+		} catch {
+			entries = undefined;
+		}
+	}
+	const source = entries ?? ctx.sessionManager.getBranch();
 	const prompts: Array<{ ms: number; text: string }> = [];
 	const dayCounts = new Map<string, number>();
 	let lastMs = NaN;
 	let firstMs = NaN;
 
-	for (const e of ctx.sessionManager.getBranch()) {
+	for (const e of source) {
 		const ms = entryMs(e);
 		if (Number.isFinite(ms)) {
 			if (!Number.isFinite(firstMs)) firstMs = ms;
@@ -185,7 +203,7 @@ class BriefOverlay implements Component {
 		lines.push(
 			th.fg(
 				"dim",
-				`${this.model.prompts.length} 次提问 · ${this.model.days.reduce((n, d) => n + d.count, 0)} 条回复 · 活跃 ${this.model.days.length} 天`,
+				`${this.model.prompts.length} 次提问 · ${this.model.days.reduce((n, d) => n + d.count, 0)} 轮回复 · 活跃 ${this.model.days.length} 天`,
 			),
 		);
 

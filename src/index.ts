@@ -1,18 +1,22 @@
 /**
- * pi-brief — 会话速览。
+ * pi-brief — session at a glance.
  *
- * 两件事：
- * 1. footer 常驻状态段：会话创建时间 + 最后一次回复时间（agent 运行时显示「回复中…」）。
- * 2. /brief 命令：覆盖层展示本会话的时间线（按天回复数）和全部用户提问（旧 → 新），
- *    帮助在 herdr 里切回一个挂了很久的会话时快速恢复上下文。
+ * Two things:
+ * 1. A persistent footer status segment: session creation time + time of the last
+ *    assistant reply ("Working…" while the agent is running).
+ * 2. The /brief command: an overlay with the session's activity timeline (replies per
+ *    day) and every user prompt (old → new), to quickly recover context when switching
+ *    back to a long-lived session (e.g. in herdr).
  *
- * 数据来源：session 文件全量 JSONL（每条带 ISO 时间戳）。/brief 读文件而不是活动
- * 分支，所以 compaction 之后旧提问照样可见；创建时间取文件头部时间戳。footer 的
- * 最后回复时间只查活动分支（压缩后最后一条回复必然在保留区，不必扫全文件）。
- * 纯本地计算，不发起模型调用，不轮询。
+ * Data source: the full session JSONL file (every entry carries an ISO timestamp).
+ * /brief reads the file instead of the active branch, so prompts from before a
+ * /compact stay visible; creation time comes from the file header. The footer's last
+ * reply time only scans the active branch (after compaction the last reply is always
+ * in the retained region, so no full-file scan is needed). Purely local: no model
+ * calls, no polling.
  *
- * 显示格式：`创建 10-23 09:12 · 回复 10-25 19:20`，跨年带年份。
- * 非 TUI 模式（RPC/JSON/print）静默。
+ * Format: `Created 10-23 09:12 · Last reply 10-25 19:20`; the year is included for
+ * sessions from previous years. Silent in non-TUI modes (RPC/JSON/print).
  */
 
 import type {
@@ -33,7 +37,7 @@ import { readFileSync } from "node:fs";
 
 const STATUS_KEY = "session-times";
 
-/** footer 状态段与覆盖层共用的时间格式：当年 MM-DD HH:mm，跨年带年份。 */
+/** Time format shared by the footer and the overlay: MM-DD HH:mm, with year for other years. */
 function formatStamp(ms: number): string {
 	const d = new Date(ms);
 	const p = (n: number) => String(n).padStart(2, "0");
@@ -51,7 +55,7 @@ function localDay(ms: number): string {
 	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-/** 条目时间：entry.timestamp 是 ISO 字符串，message.timestamp 是 Unix 毫秒，做个兜底。 */
+/** Entry time: entry.timestamp is an ISO string, message.timestamp is Unix ms; fall back between them. */
 function entryMs(e: SessionEntry): number {
 	const outer = (e as { timestamp?: string }).timestamp;
 	const ms = outer ? Date.parse(outer) : NaN;
@@ -60,7 +64,7 @@ function entryMs(e: SessionEntry): number {
 	return typeof inner === "number" ? inner : NaN;
 }
 
-/** 从 session 文件头部读创建时间（与 compaction 无关）。读不到返回 NaN。 */
+/** Creation time from the session file header (immune to compaction). NaN when unavailable. */
 function readCreatedMs(ctx: ExtensionContext): number {
 	try {
 		const file = ctx.sessionManager.getSessionFile?.();
@@ -71,7 +75,7 @@ function readCreatedMs(ctx: ExtensionContext): number {
 			if (Number.isFinite(ms)) return ms;
 		}
 	} catch {
-		// 读失败就退回 branch 首条时间
+		// fall back to the first branch entry
 	}
 	return NaN;
 }
@@ -80,20 +84,21 @@ interface BriefModel {
 	createdMs: number;
 	lastMs: number;
 	prompts: Array<{ ms: number; text: string }>;
-	/** 按天（本地时区）统计的 assistant 回复数，升序。 */
+	/** Assistant replies per local-timezone day, ascending. */
 	days: Array<{ day: string; count: number }>;
 }
 
-/** 从当前 branch 或 session 文件提取覆盖层要用的全部数据。空会话返回 null。 */
+/** Collect overlay data from the session file (preferred) or the active branch. Null when empty. */
 function buildBriefModel(ctx: ExtensionContext): BriefModel | null {
-	// 优先读 session 文件全量历史：compaction 只改活动分支，不删文件里的原始条目，
-	// 这样 compact 过的旧会话照样能看到完整提问列表和时间线。没有文件
-	// （--no-session 的临时会话）或读失败时退回当前 branch。
+	// Prefer the full session file: compaction only rewrites the active branch and never
+	// deletes original entries, so prompts from before a /compact stay visible. Without
+	// a file (--no-session) or on read failure, fall back to the active branch.
 	const file = ctx.sessionManager.getSessionFile?.();
 	let entries: SessionEntry[] | undefined;
 	if (file) {
 		try {
-			// 逐行容错：agent 流式写入时最后一行可能只写了一半，坏行跳过而不是整体失败。
+			// Per-line tolerance: while the agent streams, the last line may be half-written;
+			// skip bad lines instead of failing the whole file.
 			const parsed: SessionEntry[] = [];
 			for (const line of readFileSync(file, "utf8").split("\n")) {
 				const trimmed = line.trim();
@@ -101,7 +106,7 @@ function buildBriefModel(ctx: ExtensionContext): BriefModel | null {
 				try {
 					parsed.push(JSON.parse(trimmed) as SessionEntry);
 				} catch {
-					// 半行或非 JSON 行，跳过
+					// half line or non-JSON, skip
 				}
 			}
 			entries = parsed;
@@ -136,7 +141,8 @@ function buildBriefModel(ctx: ExtensionContext): BriefModel | null {
 					.map((b) => (b && b.type === "text" && typeof b.text === "string" ? b.text : ""))
 					.join(" ");
 			}
-			// 剥掉 skill 展开块，剩下的才是用户敲的字；纯 skill 消息用名字占位
+			// Strip expanded skill blocks; what remains is what the user actually typed.
+			// A skill-only message keeps a named tag.
 			const skills: string[] = [];
 			text = text.replace(SKILL_BLOCK, (_m: string, name: string) => {
 				skills.push(name);
@@ -148,10 +154,11 @@ function buildBriefModel(ctx: ExtensionContext): BriefModel | null {
 				oneLine = oneLine ? `${tag} ${oneLine}` : tag;
 			}
 			if (!oneLine) continue;
-			// 超长粘贴类内容拒头去尾：开头是上下文，结尾往往是真正的诉求
+			// Head+tail elision for very long content (large pastes): the head is context,
+			// the tail usually carries the actual request.
 			if (oneLine.length > ELIDE_THRESHOLD) {
 				const hidden = oneLine.length - ELIDE_HEAD - ELIDE_TAIL;
-				oneLine = `${oneLine.slice(0, ELIDE_HEAD)} ……中间省略 ${hidden} 字…… ${oneLine.slice(-ELIDE_TAIL)}`;
+				oneLine = `${oneLine.slice(0, ELIDE_HEAD)} … ${hidden} chars omitted … ${oneLine.slice(-ELIDE_TAIL)}`;
 			}
 			prompts.push({ ms, text: oneLine });
 		}
@@ -172,18 +179,18 @@ function buildBriefModel(ctx: ExtensionContext): BriefModel | null {
 
 const VIEWPORT = 18;
 const OVERLAY_WIDTH = 84;
-/** 每条提问最多展示的折行数，超出的用剩余字数提示收尾。 */
+/** Max wrapped lines shown per prompt; longer ones end with a "N more chars" hint. */
 const MAX_PROMPT_LINES = 3;
-/** skill 展开块：pi 会把整个 SKILL.md 塞进 user message，用 <skill name="...">...</skill> 包裹。 */
+/** Expanded skill block: pi inlines the whole SKILL.md into the user message, wrapped in <skill> tags. */
 const SKILL_BLOCK = /<skill name="([^"]*)"[^>]*>[\s\S]*?<\/skill>/g;
-/** 超长内容（整段粘贴等）的拒头去尾阈值与保留量，避免粘贴淹没问题本身。 */
+/** Head+tail elision thresholds for very long content (large pastes). */
 const ELIDE_THRESHOLD = 300;
 const ELIDE_HEAD = 72;
 const ELIDE_TAIL = 48;
 
 class BriefOverlay implements Component {
 	private offset = 0;
-	/** 每条提问在正文行数组里的行号区间 [start, end)，供滚动指示器换算「正在看第几条」。 */
+	/** Line range [start, end) of each prompt in the body, for prompt-based scroll info. */
 	private spans: Array<{ start: number; end: number }> = [];
 
 	constructor(
@@ -227,7 +234,7 @@ class BriefOverlay implements Component {
 		return this.bodyLines().length;
 	}
 
-	/** 覆盖层正文（不含边框），每次按当前宽度重建；内容量小，不值得缓存。 */
+	/** Overlay body (without border), rebuilt per render; the content is small, caching is not worth it. */
 	private bodyLines(): string[] {
 		const th = this.theme;
 		const w = Math.max(20, OVERLAY_WIDTH - 4);
@@ -235,19 +242,21 @@ class BriefOverlay implements Component {
 		this.spans = [];
 
 		const parts: string[] = [];
-		if (Number.isFinite(this.model.createdMs)) parts.push(`创建 ${formatStamp(this.model.createdMs)}`);
-		if (Number.isFinite(this.model.lastMs)) parts.push(`最后回复 ${formatStamp(this.model.lastMs)}`);
+		if (Number.isFinite(this.model.createdMs)) parts.push(`Created ${formatStamp(this.model.createdMs)}`);
+		if (Number.isFinite(this.model.lastMs)) parts.push(`Last reply ${formatStamp(this.model.lastMs)}`);
 		lines.push(th.fg("dim", parts.join(" · ")));
 		lines.push("");
+		const replies = this.model.days.reduce((n, d) => n + d.count, 0);
+		const days = this.model.days.length;
 		lines.push(
 			th.fg(
 				"dim",
-				`${this.model.prompts.length} 次提问 · ${this.model.days.reduce((n, d) => n + d.count, 0)} 轮回复 · 活跃 ${this.model.days.length} 天`,
+				`${this.model.prompts.length} prompts · ${replies} replies · ${days} active ${days === 1 ? "day" : "days"}`,
 			),
 		);
 
 		lines.push("");
-		lines.push(th.fg("muted", "时间线（每天回复数）"));
+		lines.push(th.fg("muted", "Timeline (replies per day)"));
 		const maxCount = Math.max(...this.model.days.map((d) => d.count), 1);
 		for (const d of this.model.days) {
 			const barLen = Math.max(1, Math.round((d.count / maxCount) * 16));
@@ -257,7 +266,7 @@ class BriefOverlay implements Component {
 		}
 
 		lines.push("");
-		lines.push(th.fg("muted", "提问（旧 → 新）"));
+		lines.push(th.fg("muted", "Prompts (old → new)"));
 		const tsWidth = visibleWidth("10-00 00:00  ");
 		const textWidth = Math.max(10, w - tsWidth);
 		const continuation = " ".repeat(tsWidth);
@@ -269,7 +278,7 @@ class BriefOverlay implements Component {
 			shown.forEach((line, i) => lines.push(`${i === 0 ? `${ts} ` : continuation}${line}`));
 			if (wrapped.length > MAX_PROMPT_LINES) {
 				const hidden = p.text.length - shown.reduce((n, line) => n + line.length, 0);
-				lines.push(`${continuation}${th.fg("dim", `…其余 ${hidden} 字`)} `);
+				lines.push(`${continuation}${th.fg("dim", `… ${hidden} more chars`)} `);
 			}
 			this.spans.push({ start, end: lines.length });
 		}
@@ -283,7 +292,8 @@ class BriefOverlay implements Component {
 		const maxOffset = Math.max(0, body.length - VIEWPORT);
 		this.offset = Math.max(0, Math.min(maxOffset, this.offset));
 
-		// 可滚动时按「第几条提问」报位置；窗口还在时间线区域时报区域名；不超屏则不显示
+		// Only show a position indicator when scrollable: which prompts are in view, or
+		// "Timeline" while the window is still above the prompt list.
 		let scrollInfo = "";
 		if (maxOffset > 0) {
 			const winEnd = Math.min(body.length, this.offset + VIEWPORT);
@@ -295,18 +305,18 @@ class BriefOverlay implements Component {
 				const last = visible[visible.length - 1]! + 1;
 				scrollInfo
 					= first === last
-						? `提问 ${first}/${this.model.prompts.length} · `
-						: `提问 ${first}-${last}/${this.model.prompts.length} · `;
+						? `Prompt ${first}/${this.model.prompts.length} · `
+						: `Prompts ${first}-${last}/${this.model.prompts.length} · `;
 			} else {
-				scrollInfo = "时间线 · ";
+				scrollInfo = "Timeline · ";
 			}
 		}
-		const hint = `${scrollInfo}q 关闭 · ↑↓ 滚动`;
+		const hint = `${scrollInfo}q close · ↑↓ scroll`;
 		const hintLine = ` ${th.fg("dim", truncateToWidth(hint, innerW - 2, "…"))}`;
 
 		const visible = [...body.slice(this.offset, this.offset + VIEWPORT), hintLine];
 
-		const titleStr = truncateToWidth(" 会话速览 ", innerW);
+		const titleStr = truncateToWidth(" Session brief ", innerW);
 		const titleW = visibleWidth(titleStr);
 		const dash = (n: number) => th.fg("border", "─".repeat(Math.max(0, n)));
 		const leftDashes = Math.floor((innerW - titleW) / 2);
@@ -335,9 +345,9 @@ export default function (pi: ExtensionAPI): void {
 	const renderStatus = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
 		const parts: string[] = [];
-		if (Number.isFinite(createdMs)) parts.push(`创建 ${formatStamp(createdMs)}`);
-		if (busy) parts.push("回复中…");
-		else if (Number.isFinite(lastMs)) parts.push(`回复 ${formatStamp(lastMs)}`);
+		if (Number.isFinite(createdMs)) parts.push(`Created ${formatStamp(createdMs)}`);
+		if (busy) parts.push("Working…");
+		else if (Number.isFinite(lastMs)) parts.push(`Last reply ${formatStamp(lastMs)}`);
 		ctx.ui.setStatus(STATUS_KEY, parts.length ? ctx.ui.theme.fg("dim", parts.join(" · ")) : undefined);
 	};
 
@@ -374,15 +384,15 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("brief", {
-		description: "会话速览：时间线与提问列表",
+		description: "Session brief: activity timeline and prompt history",
 		handler: async (_args: string, ctx: ExtensionCommandContext) => {
 			if (!ctx.hasUI) {
-				ctx.ui.notify("/brief 需要终端界面", "error");
+				ctx.ui.notify("/brief needs an interactive terminal", "error");
 				return;
 			}
 			const model = buildBriefModel(ctx);
 			if (!model) {
-				ctx.ui.notify("空会话，没有内容可看", "info");
+				ctx.ui.notify("Empty session, nothing to show", "info");
 				return;
 			}
 			await ctx.ui.custom<void>(

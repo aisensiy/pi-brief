@@ -183,6 +183,8 @@ const ELIDE_TAIL = 48;
 
 class BriefOverlay implements Component {
 	private offset = 0;
+	/** 每条提问在正文行数组里的行号区间 [start, end)，供滚动指示器换算「正在看第几条」。 */
+	private spans: Array<{ start: number; end: number }> = [];
 
 	constructor(
 		private readonly tui: TUI,
@@ -230,6 +232,7 @@ class BriefOverlay implements Component {
 		const th = this.theme;
 		const w = Math.max(20, OVERLAY_WIDTH - 4);
 		const lines: string[] = [];
+		this.spans = [];
 
 		const parts: string[] = [];
 		if (Number.isFinite(this.model.createdMs)) parts.push(`创建 ${formatStamp(this.model.createdMs)}`);
@@ -259,6 +262,7 @@ class BriefOverlay implements Component {
 		const textWidth = Math.max(10, w - tsWidth);
 		const continuation = " ".repeat(tsWidth);
 		for (const p of this.model.prompts) {
+			const start = lines.length;
 			const ts = th.fg("dim", formatStamp(p.ms).padEnd(tsWidth - 2));
 			const wrapped = wrapTextWithAnsi(p.text, textWidth);
 			const shown = wrapped.slice(0, MAX_PROMPT_LINES);
@@ -267,6 +271,7 @@ class BriefOverlay implements Component {
 				const hidden = p.text.length - shown.reduce((n, line) => n + line.length, 0);
 				lines.push(`${continuation}${th.fg("dim", `…其余 ${hidden} 字`)} `);
 			}
+			this.spans.push({ start, end: lines.length });
 		}
 		return lines;
 	}
@@ -278,10 +283,24 @@ class BriefOverlay implements Component {
 		const maxOffset = Math.max(0, body.length - VIEWPORT);
 		this.offset = Math.max(0, Math.min(maxOffset, this.offset));
 
-		// 内容超屏时才显示行号窗口，否则纯噪音
-		const scrollInfo = maxOffset > 0
-			? `第 ${this.offset + 1}-${Math.min(body.length, this.offset + VIEWPORT)} 行，共 ${body.length} 行 · `
-			: "";
+		// 可滚动时按「第几条提问」报位置；窗口还在时间线区域时报区域名；不超屏则不显示
+		let scrollInfo = "";
+		if (maxOffset > 0) {
+			const winEnd = Math.min(body.length, this.offset + VIEWPORT);
+			const visible = this.spans
+				.map((s, i) => (s.end > this.offset && s.start < winEnd ? i : -1))
+				.filter((i) => i >= 0);
+			if (visible.length > 0) {
+				const first = visible[0]! + 1;
+				const last = visible[visible.length - 1]! + 1;
+				scrollInfo
+					= first === last
+						? `提问 ${first}/${this.model.prompts.length} · `
+						: `提问 ${first}-${last}/${this.model.prompts.length} · `;
+			} else {
+				scrollInfo = "时间线 · ";
+			}
+		}
 		const hint = `${scrollInfo}q 关闭 · ↑↓ 滚动`;
 		const hintLine = ` ${th.fg("dim", truncateToWidth(hint, innerW - 2, "…"))}`;
 

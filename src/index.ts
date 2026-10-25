@@ -88,11 +88,18 @@ function buildBriefModel(ctx: ExtensionContext): BriefModel | null {
 	let entries: SessionEntry[] | undefined;
 	if (file) {
 		try {
-			entries = readFileSync(file, "utf8")
-				.split("\n")
-				.map((line) => line.trim())
-				.filter(Boolean)
-				.map((line) => JSON.parse(line) as SessionEntry);
+			// 逐行容错：agent 流式写入时最后一行可能只写了一半，坏行跳过而不是整体失败。
+			const parsed: SessionEntry[] = [];
+			for (const line of readFileSync(file, "utf8").split("\n")) {
+				const trimmed = line.trim();
+				if (!trimmed) continue;
+				try {
+					parsed.push(JSON.parse(trimmed) as SessionEntry);
+				} catch {
+					// 半行或非 JSON 行，跳过
+				}
+			}
+			entries = parsed;
 		} catch {
 			entries = undefined;
 		}
